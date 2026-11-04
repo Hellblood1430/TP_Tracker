@@ -403,7 +403,9 @@ void restore(bool autoSeed = true) {
         status = "Seed: " + model.seed + " (selected save)";
     } else {
         if (!seedError.empty()) mods::log::warn("TPTracker: selected save seed metadata unavailable: {}. Preserve the card, its .mods folder and the matching randomizer seed folder together.",seedError);
-        status = model.seedLoaded ? "Seed: " + model.seed : "Load this save's spoiler log in F1. Automatic seed lookup needs a saved randomizer slot.";
+        status = model.seedLoaded ? "Seed: " + model.seed
+            : seedError.empty() ? std::string("Load this save's spoiler log in F1. Automatic seed lookup needs a saved randomizer slot.")
+            : "Automatic seed lookup failed (" + seedError + "). Load this save's spoiler log in F1.";
     }
     dirty = true;
     nextScan = {};

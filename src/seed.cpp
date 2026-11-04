@@ -91,22 +91,60 @@ bool loadSelectedSeed(Model& model, const std::filesystem::path& dataRoot, std::
         auto sidecar = type == AURORA_CARD_GCI_DIRECTORY
             ? std::filesystem::u8path(path) / (key + ".mods")
             : std::filesystem::u8path(path + ".mods") / key;
-        auto data = Json::parse(read(sidecar / "dev.twilitrealm.randomizer.json"));
-        const auto hash = decode(data.at("slots").at(slot).at("blobs").at("seed_hash").get<std::string>());
-        if (!safe(hash)) throw std::runtime_error("Invalid seed folder name");
-        auto folder = dataRoot / "dev.twilitrealm.randomizer" / "seeds" / hash;
-        auto seedData = read(folder / "seed.dat");
-        if (!seedData.starts_with("formatVersion: 3")) throw std::runtime_error("Unsupported seed.dat version");
-        Model candidate = model;
-        // Full logs supply routes and retrospective item history. Inventory and
-        // completion always come from the live save, never from placements.
-        auto log = folder / (hash + " Spoiler Log.txt");
-        if (!std::filesystem::exists(log)) log = folder / (hash + " Anti-Spoiler Log.txt");
-        candidate.loadSeed(read(log));
-        if (candidate.seed != hash) throw std::runtime_error("Seed log does not match selected save");
-        if(candidate.shuffled) candidate.loadNativeEntrances(seedData);
-        model = std::move(candidate);
-        return true;
+
+        // Seed sources, in order: the official randomizer, then the Archipelago mod
+        // (which keeps the same layout under its own mod id). A source is only tried
+        // if the save has a sidecar file for it, so ordinary randomizer saves behave
+        // exactly as before.
+        static const char* const sources[] = {"dev.twilitrealm.randomizer", "com.noahsmaximum.dusklight_archipelago"};
+        std::string lastError;
+        for (const char* source : sources) {
+            const std::string modId = source;
+            const auto sidecarFile = sidecar / (modId + ".json");
+            if (!std::filesystem::exists(sidecarFile)) continue;
+            try {
+                auto data = Json::parse(read(sidecarFile));
+                const auto& blobs = data.at("slots").at(slot).at("blobs");
+                if (!blobs.contains("seed_hash")) throw std::runtime_error("this save slot has no seed_hash");
+                const auto hash = decode(blobs.at("seed_hash").get<std::string>());
+                if (!safe(hash)) throw std::runtime_error("Invalid seed folder name");
+                // The Archipelago mod may keep its seeds in its own data folder or reuse the randomizer's.
+                std::vector<std::filesystem::path> folders;
+                folders.push_back(dataRoot / modId / "seeds" / hash);
+                if (modId != "dev.twilitrealm.randomizer") folders.push_back(dataRoot / "dev.twilitrealm.randomizer" / "seeds" / hash);
+                std::filesystem::path folder;
+                for (const auto& candidateFolder : folders)
+                    if (std::filesystem::is_directory(candidateFolder)) { folder = candidateFolder; break; }
+                if (folder.empty()) throw std::runtime_error("seed folder not found: " + folders.front().generic_string());
+                // Full logs supply routes and retrospective item history. Inventory and
+                // completion always come from the live save, never from placements.
+                auto log = folder / (hash + " Spoiler Log.txt");
+                if (!std::filesystem::exists(log)) log = folder / (hash + " Anti-Spoiler Log.txt");
+                if (!std::filesystem::exists(log)) log = folder / "tptracker_seed.json";
+                if (!std::filesystem::exists(log))
+                    throw std::runtime_error("no spoiler log, anti-spoiler log or tptracker_seed.json in " + folder.generic_string());
+                Model candidate = model;
+                candidate.loadSeed(read(log));
+                if (candidate.seed != hash) throw std::runtime_error("Seed log does not match selected save");
+                // seed.dat only carries entrance data, so it is required only for shuffled entrances.
+                const auto seedFile = folder / "seed.dat";
+                if (std::filesystem::exists(seedFile)) {
+                    const auto seedData = read(seedFile);
+                    if (candidate.shuffled) {
+                        if (!seedData.starts_with("formatVersion: 3")) throw std::runtime_error("Unsupported seed.dat version");
+                        candidate.loadNativeEntrances(seedData);
+                    }
+                } else if (candidate.shuffled) {
+                    throw std::runtime_error("seed.dat not found in " + folder.generic_string());
+                }
+                model = std::move(candidate);
+                return true;
+            } catch (const std::exception& e) {
+                lastError = modId + ": " + e.what();
+            }
+        }
+        if (!lastError.empty()) error = lastError;
+        return false;
     } catch (const std::exception& e) { error = e.what(); return false; }
 }
 }
